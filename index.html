@@ -536,76 +536,156 @@ function showToast(msg){
   t.classList.add('show');
   setTimeout(()=> t.classList.remove('show'), 2200);
 }
-function detectRegion(){
+let userPickedRegion = false;
+function detectRegionByTimezone(){
   try{
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
     if(tz === 'Asia/Singapore') return 'Singapore';
     return 'India';
   }catch(e){ return 'India'; }
 }
+function detectRegionByLocation(){
+  return new Promise((resolve)=>{
+    if(!navigator.geolocation){ resolve(null); return; }
+    navigator.geolocation.getCurrentPosition(
+      (pos)=>{
+        const lat = pos.coords.latitude, lon = pos.coords.longitude;
+        if(lat>=1.15 && lat<=1.48 && lon>=103.6 && lon<=104.1) resolve('Singapore');
+        else if(lat>=6.4 && lat<=37.6 && lon>=68.0 && lon<=97.5) resolve('India');
+        else resolve(null);
+      },
+      ()=>resolve(null),
+      { timeout:6000, maximumAge:600000 }
+    );
+  });
+}
+function utf8ToBase64(str){ return btoa(unescape(encodeURIComponent(str))); }
 
-/* ---------------- Storage ---------------- */
-async function loadAll(){
-  CURRENT_REGION = detectRegion();
+/* ---------------- GitHub-backed storage ----------------
+   This site runs on GitHub Pages, which has no database of its own,
+   so the whole catalog lives in one JSON file in this same repo.
+   Anyone can READ it (public raw file, no login needed).
+   Only the host can WRITE, using a personal access token that stays
+   on the host's own device (browser localStorage) — never in this file. */
+const GH_OWNER = 'krishiv-1';
+const GH_REPO = 'Curated-Spaces';
+const GH_BRANCH = 'main';
+const GH_PATH = 'data/store.json';
 
-  for(const region of REGIONS){
-    try{
-      const idxRes = await window.storage.get('product-index:'+region, true);
-      const ids = idxRes && idxRes.value ? JSON.parse(idxRes.value) : [];
-      const loaded = [];
-      for(const id of ids){
-        try{
-          const r = await window.storage.get('product:'+region+':'+id, true);
-          if(r && r.value) loaded.push(JSON.parse(r.value));
-        }catch(e){}
-      }
-      PRODUCTS[region] = loaded;
-    }catch(e){ PRODUCTS[region] = []; }
+function getPAT(){ return localStorage.getItem('cs_gh_pat') || ''; }
+function setPAT(v){ localStorage.setItem('cs_gh_pat', v || ''); }
 
-    try{
-      const c = await window.storage.get('categories:'+region, true);
-      CATEGORIES[region] = (c && c.value) ? JSON.parse(c.value) : [];
-    }catch(e){ CATEGORIES[region] = []; }
-    if(CATEGORIES[region].length === 0){
-      CATEGORIES[region] = ['Decor','Furniture','Lighting','Wall Decor'];
-      await saveCategories(region);
+function defaultDB(){
+  return {
+    hostPin: '2026',
+    regions: {
+      India: { products: [], categories: ['Decor','Furniture','Lighting','Wall Decor'], settings: {phone:'',email:''} },
+      Singapore: { products: [], categories: ['Decor','Furniture','Lighting','Wall Decor'], settings: {phone:'',email:''} }
     }
-
-    try{
-      const s = await window.storage.get('settings:'+region, true);
-      if(s && s.value) REGION_SETTINGS[region] = Object.assign({phone:'',email:''}, JSON.parse(s.value));
-    }catch(e){}
+  };
+}
+function normalizeDB(json){
+  const d = defaultDB();
+  if(json && json.hostPin) d.hostPin = json.hostPin;
+  if(json && json.regions){
+    REGIONS.forEach(r=>{
+      if(json.regions[r]){
+        d.regions[r].products = json.regions[r].products || [];
+        d.regions[r].categories = (json.regions[r].categories && json.regions[r].categories.length) ? json.regions[r].categories : d.regions[r].categories;
+        d.regions[r].settings = Object.assign({phone:'',email:''}, json.regions[r].settings||{});
+      }
+    });
   }
+  return d;
+}
+let DB = defaultDB();
 
+async function fetchDB(){
   try{
-    const p = await window.storage.get('host-pin', true);
-    if(p && p.value) HOST_PIN = JSON.parse(p.value);
-  }catch(e){}
+    const url = `https://raw.githubusercontent.com/${GH_OWNER}/${GH_REPO}/${GH_BRANCH}/${GH_PATH}?t=${Date.now()}`;
+    const res = await fetch(url);
+    if(!res.ok) throw new Error('no data file yet');
+    const json = await res.json();
+    DB = normalizeDB(json);
+  }catch(e){
+    DB = defaultDB();
+  }
+}
+function syncStateFromDB(){
+  REGIONS.forEach(r=>{
+    PRODUCTS[r] = DB.regions[r].products;
+    CATEGORIES[r] = DB.regions[r].categories;
+    REGION_SETTINGS[r] = DB.regions[r].settings;
+  });
+  HOST_PIN = DB.hostPin;
+}
+function buildDBFromState(){
+  DB = {
+    hostPin: HOST_PIN,
+    regions: {
+      India: { products: PRODUCTS.India, categories: CATEGORIES.India, settings: REGION_SETTINGS.India },
+      Singapore: { products: PRODUCTS.Singapore, categories: CATEGORIES.Singapore, settings: REGION_SETTINGS.Singapore }
+    }
+  };
+}
+async function pushDB(){
+  const pat = getPAT();
+  if(!pat){ showToast('Paste your GitHub token above first, then Save'); return false; }
+  showToast('Saving to GitHub…');
+  try{
+    let sha;
+    const getRes = await fetch(`https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${GH_PATH}?ref=${GH_BRANCH}`, {
+      headers:{ 'Authorization':'token '+pat, 'Accept':'application/vnd.github+json' }
+    });
+    if(getRes.ok){ sha = (await getRes.json()).sha; }
+    else if(getRes.status !== 404){ throw new Error('read failed ('+getRes.status+')'); }
+    const body = { message:'Update Curated Spaces catalog', content: utf8ToBase64(JSON.stringify(DB, null, 2)), branch: GH_BRANCH };
+    if(sha) body.sha = sha;
+    const putRes = await fetch(`https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${GH_PATH}`, {
+      method:'PUT',
+      headers:{ 'Authorization':'token '+pat, 'Accept':'application/vnd.github+json', 'Content-Type':'application/json' },
+      body: JSON.stringify(body)
+    });
+    if(!putRes.ok) throw new Error('save failed ('+putRes.status+')');
+    showToast('Saved');
+    return true;
+  }catch(e){
+    console.error(e);
+    showToast('Could not save to GitHub — check your token');
+    return false;
+  }
+}
+async function persist(){ buildDBFromState(); return await pushDB(); }
+
+/* ---------------- Load / refresh ---------------- */
+async function loadAll(){
+  CURRENT_REGION = detectRegionByTimezone();
+  await fetchDB();
+  syncStateFromDB();
 
   renderRegionTabs();
   renderBulkBanner();
   renderCartCount();
   renderGrid();
-}
 
-async function saveIndex(region){
-  await window.storage.set('product-index:'+region, JSON.stringify(PRODUCTS[region].map(p=>p.id)), true);
+  detectRegionByLocation().then(r=>{
+    if(r && !userPickedRegion && r !== CURRENT_REGION){
+      CURRENT_REGION = r;
+      renderRegionTabs();
+      renderBulkBanner();
+      renderCartCount();
+      renderGrid();
+    }
+  });
 }
-async function saveProductRec(region, p){
-  await window.storage.set('product:'+region+':'+p.id, JSON.stringify(p), true);
+async function refreshFromRemote(){
+  if(document.getElementById('adminScreen').style.display === 'block') return;
+  await fetchDB();
+  syncStateFromDB();
+  renderCatTabs();
+  renderGrid();
 }
-async function deleteProductStorage(region, id){
-  try{ await window.storage.delete('product:'+region+':'+id, true); }catch(e){}
-}
-async function saveCategories(region){
-  await window.storage.set('categories:'+region, JSON.stringify(CATEGORIES[region]), true);
-}
-async function saveRegionSettings(region){
-  await window.storage.set('settings:'+region, JSON.stringify(REGION_SETTINGS[region]), true);
-}
-async function saveHostPin(){
-  await window.storage.set('host-pin', JSON.stringify(HOST_PIN), true);
-}
+setInterval(refreshFromRemote, 45000);
 
 /* ---------------- Region tabs / banner ---------------- */
 function renderRegionTabs(){
@@ -613,6 +693,7 @@ function renderRegionTabs(){
   el.innerHTML = REGIONS.map(r=>`<button class="${r===CURRENT_REGION?'active':''}" data-region="${r}">${r}</button>`).join('');
   el.querySelectorAll('button').forEach(btn=>{
     btn.addEventListener('click', ()=>{
+      userPickedRegion = true;
       CURRENT_REGION = btn.dataset.region;
       currentCategory = 'All'; currentSearch = '';
       const si = document.getElementById('searchInput'); if(si) si.value = '';
@@ -792,10 +873,7 @@ function renderCartCount(){
   document.getElementById('cartCount').textContent = n;
 }
 async function openDrawer(){
-  try{
-    const s = await window.storage.get('settings:'+CURRENT_REGION, true);
-    if(s && s.value) REGION_SETTINGS[CURRENT_REGION] = Object.assign({phone:'',email:''}, JSON.parse(s.value));
-  }catch(e){}
+  await refreshFromRemote();
   renderDrawer();
   document.getElementById('drawer').classList.add('open');
   document.getElementById('drawerOverlay').classList.add('open');
@@ -951,15 +1029,20 @@ function renderAdminLogin(){
 function renderAdminDashboard(){
   editingId = null; editingRegion = null; pendingImages = [null,null,null];
   const el = document.getElementById('adminScreen');
+  const connected = !!getPAT();
   el.innerHTML = `
     <div class="admin-top"><h2>Curated Spaces — Host</h2><button id="adminExitBtn">Back to site</button></div>
     <div class="admin-wrap">
       <div class="admin-card">
-        <h3>Host PIN</h3>
+        <h3>Host PIN & GitHub connection</h3>
         <div class="two-col">
           <div class="field"><label>PIN (used to open this Admin page)</label><input id="sPin" value="${esc(HOST_PIN)}" placeholder="4-digit PIN"/></div>
+          <div class="field"><label>GitHub token (stays only on this device)</label><input id="ghToken" type="password" value="${esc(getPAT())}" placeholder="ghp_..."/></div>
         </div>
-        <div class="save-row"><button class="primary-btn" id="savePinBtn">Save PIN</button></div>
+        <p style="font-size:12px;color:${connected?'var(--gold)':'#a3402f'};margin:-6px 0 14px;">
+          ${connected ? '● Connected — your changes will save to GitHub.' : '○ Not connected yet — paste a token above so changes actually save.'}
+        </p>
+        <div class="save-row"><button class="primary-btn" id="savePinBtn">Save</button></div>
       </div>
 
       <div class="admin-split">
@@ -971,8 +1054,9 @@ function renderAdminDashboard(){
   document.getElementById('adminExitBtn').onclick = closeAdmin;
   document.getElementById('savePinBtn').onclick = async ()=>{
     HOST_PIN = document.getElementById('sPin').value.trim() || '2026';
-    await saveHostPin();
-    showToast('PIN updated');
+    setPAT(document.getElementById('ghToken').value.trim());
+    await persist();
+    renderAdminDashboard();
   };
 
   REGIONS.forEach(region=>{
@@ -1007,8 +1091,7 @@ function renderAdminHalf(region){
 async function handleSaveRegionSettings(region){
   REGION_SETTINGS[region].phone = document.getElementById('sPhone-'+region).value.trim();
   REGION_SETTINGS[region].email = document.getElementById('sEmail-'+region).value.trim();
-  await saveRegionSettings(region);
-  showToast(region + ' settings saved');
+  await persist();
 }
 
 function renderAdminProductList(region){
@@ -1039,8 +1122,7 @@ function renderAdminProductList(region){
       const id = btn.closest('.admin-product-row').dataset.id;
       if(!confirm('Delete this product?')) return;
       PRODUCTS[region] = PRODUCTS[region].filter(p=>p.id!==id);
-      await saveIndex(region);
-      await deleteProductStorage(region, id);
+      await persist();
       renderAdminProductList(region);
       renderGrid();
       showToast('Product deleted');
@@ -1113,7 +1195,7 @@ function renderProductFormModal(){
     if(!val) return;
     if(!CATEGORIES[region].some(c=>c.toLowerCase()===val.toLowerCase())){
       CATEGORIES[region].push(val);
-      await saveCategories(region);
+      await persist();
     }
     const sel = document.getElementById('fCategorySelect');
     sel.innerHTML = CATEGORIES[region].map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('');
@@ -1186,15 +1268,11 @@ async function handleSaveProduct(){
   if(editingId){
     const p = PRODUCTS[region].find(x=>x.id===editingId);
     p.name = name; p.category = category; p.price = price; p.description = desc; p.images = images;
-    await saveProductRec(region, p);
-    showToast('Product updated');
   } else {
     const p = { id: uid(), name, category, price, description: desc, images };
     PRODUCTS[region].push(p);
-    await saveIndex(region);
-    await saveProductRec(region, p);
-    showToast('Product added');
   }
+  await persist();
   const savedRegion = region;
   closeProductFormModal();
   renderAdminProductList(savedRegion);
