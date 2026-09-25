@@ -395,6 +395,7 @@
     position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(20px);
     background:var(--green-dark); color:var(--cream); padding:12px 22px; font-size:13px;
     z-index:300; opacity:0; transition:opacity .25s ease, transform .25s ease; pointer-events:none;
+    max-width:min(420px, 88vw); text-align:center; line-height:1.4;
   }
   .toast.show{ opacity:1; transform:translateX(-50%) translateY(0); }
   .save-row{ display:flex; justify-content:flex-end; }
@@ -530,11 +531,12 @@ let pendingImages = [null,null,null];
 function uid(){ return 'p_' + Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
 function esc(s){ return (s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function fmtPrice(p){ return p ? ('₹' + Number(p).toLocaleString('en-IN')) : ''; }
-function showToast(msg){
+function showToast(msg, ms){
   const t = document.getElementById('toast');
   t.textContent = msg;
   t.classList.add('show');
-  setTimeout(()=> t.classList.remove('show'), 2200);
+  clearTimeout(t._hideTimer);
+  t._hideTimer = setTimeout(()=> t.classList.remove('show'), ms || 2200);
 }
 let userPickedRegion = false;
 function detectRegionByTimezone(){
@@ -630,15 +632,20 @@ function buildDBFromState(){
 }
 async function pushDB(){
   const pat = getPAT();
-  if(!pat){ showToast('Paste your GitHub token above first, then Save'); return false; }
-  showToast('Saving to GitHub…');
+  if(!pat){ showToast('Paste your GitHub token above first, then Save', 5000); return false; }
+  showToast('Saving to GitHub…', 4000);
   try{
     let sha;
     const getRes = await fetch(`https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${GH_PATH}?ref=${GH_BRANCH}`, {
       headers:{ 'Authorization':'token '+pat, 'Accept':'application/vnd.github+json' }
     });
-    if(getRes.ok){ sha = (await getRes.json()).sha; }
-    else if(getRes.status !== 404){ throw new Error('read failed ('+getRes.status+')'); }
+    if(getRes.ok){
+      sha = (await getRes.json()).sha;
+    } else if(getRes.status !== 404){
+      let detail = '';
+      try{ detail = (await getRes.json()).message || ''; }catch(e2){}
+      throw new Error(`GitHub said: ${detail || getRes.status} (while checking the file)`);
+    }
     const body = { message:'Update Curated Spaces catalog', content: utf8ToBase64(JSON.stringify(DB, null, 2)), branch: GH_BRANCH };
     if(sha) body.sha = sha;
     const putRes = await fetch(`https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${GH_PATH}`, {
@@ -646,12 +653,16 @@ async function pushDB(){
       headers:{ 'Authorization':'token '+pat, 'Accept':'application/vnd.github+json', 'Content-Type':'application/json' },
       body: JSON.stringify(body)
     });
-    if(!putRes.ok) throw new Error('save failed ('+putRes.status+')');
-    showToast('Saved');
+    if(!putRes.ok){
+      let detail = '';
+      try{ detail = (await putRes.json()).message || ''; }catch(e2){}
+      throw new Error(`GitHub said: ${detail || putRes.status} (while saving)`);
+    }
+    showToast('Saved to GitHub', 3000);
     return true;
   }catch(e){
     console.error(e);
-    showToast('Could not save to GitHub — check your token');
+    showToast(e && e.message ? e.message : 'Could not reach GitHub — check your internet connection', 7000);
     return false;
   }
 }
