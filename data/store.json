@@ -1,0 +1,31 @@
+{
+  "hostPin": "2026",
+  "regions": {
+    "India": {
+      "products": [],
+      "categories": [
+        "Decor",
+        "Furniture",
+        "Lighting",
+        "Wall Decor"
+      ],
+      "settings": {
+        "phone": "",
+        "email": ""
+      }
+    },
+    "Singapore": {
+      "products": [],
+      "categories": [
+        "Decor",
+        "Furniture",
+        "Lighting",
+        "Wall Decor"
+      ],
+      "settings": {
+        "phone": "",
+        "email": ""
+      }
+    }
+  }
+}
